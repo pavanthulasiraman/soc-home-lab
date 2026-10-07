@@ -1,10 +1,6 @@
-# Lab setup: Ubuntu server
+# Lab setup: Ubuntu server and Windows endpoint
 
-I built this Ubuntu Server VM as the foundation for my security monitoring lab. My Windows laptop has a limited 8 GB RAM, so I allocated 4 GB RAM to the VM. I will evaluate Wazuh's performance with this allocation of resources before adding another endpoint.
-
-## Current status
-
-I installed Ubuntu Server and verified its version, hostname, available memory, and root filesystem space. I also configured the host-only lab network and successfully logged in to the VM over SSH from my Windows laptop.
+I built this Ubuntu Server VM as the foundation for my security monitoring lab. My Windows laptop has a limited 8 GB RAM, so I allocated 4 GB RAM to the VM. I am evaluating Wazuh's performance with this allocation and a Windows test VM before running security scenarios.
 
 ## Environment
 
@@ -39,34 +35,15 @@ Installation references: [VirtualBox VM creation](https://docs.oracle.com/en/vir
 
 ## Verification
 
-After logging in, I ran these commands to verify the hostname and Ubuntu version and check the available memory and root filesystem space before installing Wazuh:
+After logging in, I verified the hostname and Ubuntu version and checked the available memory and root filesystem space before installing Wazuh.
 
-```bash
-hostname
-lsb_release -d
-free -h
-df -h /
-```
-
-My verification results were:
-
-| Check | Observed result |
-|---|---|
-| Hostname | `soc-wazuh-server` |
-| Ubuntu version | Ubuntu 24.04.5 LTS |
-| Memory visible to Ubuntu | 3.8 GiB total, 3.4 GiB available |
-| Swap | 3.8 GiB total, unused at verification |
-| Root filesystem | `/dev/sda2`, 49G total, 40G available, 15% used |
-
-Memory usage and free disk space will change as software is installed and services run. 
-
-The screenshot below records the commands I ran and their output:
+The screenshot below records the verification results:
 
 <img width="662" height="213" alt="05-ubuntu-system-verification" src="https://github.com/user-attachments/assets/6993afb0-1738-4361-b2b3-253598d18555" />
 
 ## Lab networking and SSH access
 
-I kept Adapter 1 on NAT for installation downloads and added Adapter 2 on the host-only network. This gives my laptop a direct connection to the Ubuntu VM for SSH.
+I kept Adapter 1 on NAT for installation downloads and added Adapter 2 on the host-only network for SSH and lab communication.
 
 I used VirtualBox Host-Only Ethernet Adapter #2 with DHCP disabled and assigned the following static addresses:
 
@@ -87,19 +64,15 @@ network:
         - 192.168.149.10/24
 ```
 
-I set the file permissions with `sudo chmod 600 /etc/netplan/99-soc-lab.yaml`, applied the configuration with `sudo netplan try`. The host-only interface has no default gateway or DNS server; the NAT interface retains its download connection. I checked `ip -br address` and verified that `enp0s8` was UP with the assigned address.
+I set the file permissions with `sudo chmod 600 /etc/netplan/99-soc-lab.yaml` and applied the configuration with `sudo netplan try`. The host-only interface has no default gateway or DNS server; the NAT interface retains its download connection. I verified that `enp0s8` was UP with the assigned address.
 
 ### Troubleshooting the initial timeout
 
-The first SSH connection attempt timed out. I compared the VM's selected host-only network with Windows' actual addresses using `ipconfig /all`. The Windows' adapter names differed from VirtualBox's numbering: Ethernet 2 was the first host-only adapter, while Ethernet 3 was host-only adapter #2. The `192.168.149.1` address had been assigned to Ethernet 2 while the VM was connected to adapter #2.
-
-I restored Ethernet 2 to `192.168.56.1/24` and assigned Ethernet 3 `192.168.149.1/24`. After correcting the Windows addresses, the SSH connection succeeded.
+The first SSH attempt timed out because the Windows host-only address was assigned to the wrong adapter. I restored Ethernet 2 to `192.168.56.1/24` and assigned Ethernet 3 `192.168.149.1/24`, matching the VM's selected host-only network. The SSH connection then succeeded.
 
 ### Connection verification
 
-On Ubuntu, `ssh.socket` was active. Ubuntu 24.04 uses socket activation, so an inactive `ssh` service does not by itself mean SSH is unavailable.
-
-From my Windows laptop's PowerShell, I ran:
+On Ubuntu, `ssh.socket` was active. From my Windows laptop's PowerShell, I connected with:
 
 ```powershell
 ssh socadmin@192.168.149.10
@@ -111,6 +84,43 @@ I accepted the host key and authenticated with my private Ubuntu password. The s
 
 Networking references: [VirtualBox host-only networking](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/networkingdetails.html), [Netplan static addresses](https://netplan.readthedocs.io/en/stable/examples/#how-to-configure-a-static-ip-address), and [Ubuntu SSH socket activation](https://discourse.ubuntu.com/t/sshd-now-uses-socket-based-activation-ubuntu-22-10-and-later/30189/1).
 
+## Wazuh installation attempt
+
+I ran `sudo bash ./wazuh-install.sh -a` inside Ubuntu for the combined manager, indexer, and dashboard deployment. The assistant reported version 4.14.8. The first attempt failed with `ERROR: Wazuh-manager could not be started.` The installer removed the components and reported `Installation cleaned.`
+
+My VM's 4 GB allocation is below the 8 GiB recommendation for a combined deployment in the [Wazuh quickstart](https://documentation.wazuh.com/current/quickstart.html#requirements).
+
+### Diagnostic findings
+
+The service journal showed a successful initial start followed by a restart that exceeded the 45-second startup limit and reported a leftover Python process. The kernel journal search returned no out-of-memory kill messages. The [Wazuh 4.14.8 service template](https://github.com/wazuh/wazuh/blob/v4.14.8/src/init/templates/wazuh-manager.service) sets `TimeoutSec=45` so I retried by changing the timeout to 180 seconds which ended up working.
+
+<img width="934" height="474" alt="08-wazuh-service-verification" src="https://github.com/user-attachments/assets/986c1f5a-2bfb-491c-a687-ac59c2d32f72" />
+
+## Windows endpoint networking
+
+I configured `soc-win-test` with 2048 MB RAM and two network adapters. Adapter 1 uses NAT for internet access. Adapter 2 uses `VirtualBox Host-Only Ethernet Adapter #2`, the same host-only network as Ubuntu.
+
+Inside the Windows VM, I identified the network cards with:
+
+```powershell
+Get-NetAdapter | Select-Object Name, MacAddress
+```
+
+I matched the output against the cards configured in VirtualBox:
+
+| Windows VM interface | MAC address | VirtualBox connection | Intended IP configuration |
+|---|---|---|---|
+| Ethernet | `08-00-27-EE-34-D8` | Adapter 1: NAT | Automatic IP address and DNS |
+| Ethernet 2 | `08-00-27-E6-9B-B7` | Adapter 2: host-only #2 | Static `192.168.149.20/24`; gateway and DNS left blank |
+
+### Windows version and IP verification
+
+This screenshot records the full hostname, Windows version, and corrected IP configuration:
+
+<img width="883" height="490" alt="010-windows-endpoint-verification" src="https://github.com/user-attachments/assets/a4441485-5d94-4f3a-bd3d-93ec945e88b2" />
+
+These checks verify the endpoint's name, OS, and IP addresses. They do not yet establish that it can reach the Wazuh manager or that an agent is enrolled.
+
 ## Remaining setup
 
-The host-only network and SSH access are now verified. Wazuh deployment and the Windows endpoint setup are still pending. Before running security scenarios, disconnect the NAT adapter's virtual cable while keeping the host-only network connected.
+I need to capture the successful Wazuh deployment checks and test the Windows endpoint's connection to the manager before installing and verifying the Windows agent and Sysmon. Before running security scenarios, I need to disconnect the NAT adapters' virtual cables while keeping the host-only network connected.
